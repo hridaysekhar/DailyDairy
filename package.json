@@ -1,0 +1,15 @@
+{
+  "name": "daily-dairy",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Fetch a school parent-portal diary entry, save it as a PDF, and send it to WhatsApp",
+  "type": "commonjs",
+  "scripts": {
+    "fetch-diary": "node fetch-diary.js",
+    "postinstall": "playwright install chromium"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "playwright": "^1.47.0"
+  }
+}
