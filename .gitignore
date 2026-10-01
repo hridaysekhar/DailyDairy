@@ -3,3 +3,4 @@ node_modules/
 whatsapp-session/
 logs/
 diary/
+retry-send.js
