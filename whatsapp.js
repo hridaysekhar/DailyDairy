@@ -1,118 +1,78 @@
-// Phase 2: send a diary PDF to a WhatsApp group via WhatsApp Web automation.
+// Phase 2 (rewritten): send a diary PDF to a WhatsApp group via WAHA (self-hosted WhatsApp HTTP API).
+// WAHA runs as a Docker container (see README) and handles the actual WhatsApp Web session —
+// this module just talks to its REST API, which is far more robust than driving a browser
+// with DOM selectors that break whenever WhatsApp Web's UI changes.
+const fs = require('fs');
 const path = require('path');
-const { chromium } = require('playwright');
 
-const SESSION_DIR = path.join(__dirname, 'whatsapp-session');
-const WHATSAPP_URL = 'https://web.whatsapp.com/';
+const WAHA_URL = process.env.WAHA_URL || 'http://localhost:3000';
+const WAHA_API_KEY = process.env.WAHA_API_KEY;
+const WAHA_SESSION = process.env.WAHA_SESSION || 'default';
 const GROUP_NAME = process.env.WHATSAPP_GROUP || 'Babu Study';
 
-let context = null;
-let page = null;
-
-async function getPage() {
-  if (page) return page;
-
-  const headless = process.env.HEADLESS === 'true';
-  context = await chromium.launchPersistentContext(SESSION_DIR, {
-    headless, // visible by default so a first-time QR scan is possible; HEADLESS=true hides it
+async function wahaFetch(urlPath, options = {}) {
+  const res = await fetch(`${WAHA_URL}${urlPath}`, {
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...(WAHA_API_KEY ? { 'X-Api-Key': WAHA_API_KEY } : {}),
+      ...options.headers,
+    },
   });
-  page = context.pages()[0] || (await context.newPage());
-  await page.goto(WHATSAPP_URL, { waitUntil: 'domcontentloaded' });
-
-  // In headless (unattended/scheduled) runs nobody can scan a QR code, so fail fast
-  // instead of sitting through the full interactive wait with no one there to act on it.
-  const loginTimeoutMs = headless ? 30000 : 300000;
-  const loggedIn = await waitForLogin(page, loginTimeoutMs);
-  if (!loggedIn) {
-    throw new Error('WhatsApp Web login timed out. Scan the QR code in the opened browser window and try again.');
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new Error(`WAHA ${options.method || 'GET'} ${urlPath} failed: ${res.status} ${body.slice(0, 300)}`);
   }
-  await dismissModals(page);
-
-  return page;
+  return res.json();
 }
 
-// WhatsApp Web occasionally shows a "What's new" / announcement dialog on top of the
-// chat list after login, which blocks clicks on the search box underneath it even
-// though the search box technically exists in the DOM. Dismiss it if present.
-async function dismissModals(page) {
-  const dismissButton = page
-    .locator('button', { hasText: /^(continue|ok|got it|not now)$/i })
-    .first();
-  if ((await dismissButton.count()) > 0 && (await dismissButton.isVisible())) {
-    await dismissButton.click();
-    await page.waitForTimeout(300);
-  }
-}
+// Finds the group's chatId by name. Set WHATSAPP_CHAT_ID to skip this lookup entirely.
+async function findGroupChatId() {
+  if (process.env.WHATSAPP_CHAT_ID) return process.env.WHATSAPP_CHAT_ID;
 
-async function waitForLogin(page, timeoutMs = 300000) {
-  const searchBox = page.locator('input[aria-label="Search or start a new chat"]').first();
-  const qrCanvas = page.locator('canvas[aria-label*="scan" i]').first();
-
-  const deadline = Date.now() + timeoutMs;
-  let loggedWaitingMessage = false;
-  while (Date.now() < deadline) {
-    if (await searchBox.count() > 0) return true;
-    if (!loggedWaitingMessage && (await qrCanvas.count()) > 0) {
-      console.log('WhatsApp Web: scan the QR code in the opened browser window to log in...');
-      loggedWaitingMessage = true;
-    }
-    await page.waitForTimeout(1000);
+  const chats = await wahaFetch(
+    `/api/${WAHA_SESSION}/chats?sortBy=conversationTimestamp&sortOrder=desc&limit=50`
+  );
+  const match = chats.find((c) => {
+    const name = c?.groupMetadata?.subject || c?.name || '';
+    return name === GROUP_NAME;
+  });
+  if (!match) {
+    throw new Error(`Could not find a WhatsApp chat named "${GROUP_NAME}". Set WHATSAPP_CHAT_ID to skip lookup.`);
   }
-  return false;
+  return match.id._serialized;
 }
 
 async function sendToWhatsApp(pdfPath, caption) {
-  const p = await getPage();
-  await dismissModals(p);
-
-  console.log(`Opening WhatsApp group "${GROUP_NAME}"...`);
-  const searchBox = p.locator('input[aria-label="Search or start a new chat"]').first();
-  await searchBox.click();
-  await searchBox.fill(GROUP_NAME);
-  await p.waitForTimeout(1000);
-
-  const chatResult = p.locator('span[title]', { hasText: GROUP_NAME }).first();
-  await chatResult.waitFor({ state: 'visible', timeout: 10000 });
-  await chatResult.click();
-
-  console.log(`Attaching ${path.basename(pdfPath)}...`);
-  const attachButton = p.locator('button[aria-label="Attach"]').first();
-  await attachButton.click();
-
-  const docOption = p.getByText('Document', { exact: true }).first();
-  await docOption.waitFor({ state: 'visible', timeout: 10000 });
-  await docOption.click({ force: true });
-
-  // The attach menu registers a separate hidden file input per type (image, document, ...);
-  // the document one is the only one that doesn't restrict to images.
-  const fileInput = p.locator('input[type="file"]:not([accept*="image"])').first();
-  await fileInput.setInputFiles(pdfPath);
-
-  if (caption) {
-    const captionBox = p.locator('div[aria-label="Type a message"]').first();
-    await captionBox.waitFor({ state: 'visible', timeout: 10000 });
-    await captionBox.click();
-    await captionBox.fill(caption);
+  const status = await wahaFetch(`/api/sessions/${WAHA_SESSION}`);
+  if (status.status !== 'WORKING') {
+    throw new Error(`WAHA session "${WAHA_SESSION}" is not connected (status: ${status.status}). Scan the QR code in the WAHA dashboard.`);
   }
 
-  const sendButton = p.locator('div[aria-label="Send 1 selected"], [data-icon="wds-ic-send-filled"]').first();
-  await sendButton.waitFor({ state: 'visible', timeout: 15000 });
-  await sendButton.click();
+  console.log(`Looking up WhatsApp group "${GROUP_NAME}"...`);
+  const chatId = await findGroupChatId();
 
-  // Wait for the attachment preview to close, then give WhatsApp Web time to actually
-  // upload and deliver the message before the caller closes the browser — clicking send
-  // only queues it client-side; closing too soon after can drop it before it's transmitted.
-  await fileInput.waitFor({ state: 'detached', timeout: 15000 }).catch(() => {});
-  await p.waitForTimeout(15000);
+  console.log(`Sending ${path.basename(pdfPath)}...`);
+  const data = fs.readFileSync(pdfPath).toString('base64');
+  await wahaFetch('/api/sendFile', {
+    method: 'POST',
+    body: JSON.stringify({
+      session: WAHA_SESSION,
+      chatId,
+      caption,
+      file: {
+        mimetype: 'application/pdf',
+        filename: path.basename(pdfPath),
+        data,
+      },
+    }),
+  });
+
   console.log('Sent to WhatsApp.');
 }
 
-async function closeWhatsApp() {
-  if (context) {
-    await context.close();
-    context = null;
-    page = null;
-  }
-}
+// No persistent browser/context to close anymore — kept as a no-op so fetch-diary.js
+// doesn't need to change its call site.
+async function closeWhatsApp() {}
 
 module.exports = { sendToWhatsApp, closeWhatsApp };

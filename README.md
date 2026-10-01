@@ -30,7 +30,7 @@ Pass a from and to date to fetch a whole range (one PDF per day that has an entr
 npm run fetch-diary -- "Sep 24" "Sep 30"
 ```
 
-Both the portal browser and the WhatsApp Web browser run visibly by default so you can watch them work. Set `HEADLESS=true` to run both hidden in the background instead:
+The portal browser runs visibly by default so you can watch it work. Set `HEADLESS=true` to run it hidden in the background instead:
 
 ```
 HEADLESS=true npm run fetch-diary
@@ -44,9 +44,26 @@ Any attachments linked in the diary are downloaded to `ATTACHMENTS_DIR` (default
 
 After each PDF is saved, it's automatically sent to a WhatsApp group (set via the `WHATSAPP_GROUP` env var) with a caption like "Diary — 30 Sep 2026", via `whatsapp.js`.
 
-This uses a dedicated Chromium profile at `whatsapp-session/` (gitignored — same sensitivity as `.env`). The **first run needs a one-time QR code scan**: a separate browser window will open showing a QR code — scan it with WhatsApp on your phone (Linked Devices). After that, the session persists and no further scans are needed, even across machine restarts.
+Sending is handled by [WAHA](https://waha.devlike.pro/) (WhatsApp HTTP API) — a separate, self-hosted Docker container that runs its own WhatsApp Web session and exposes a simple REST API. `whatsapp.js` just makes HTTP calls to it; it doesn't drive a browser itself, which avoids the fragility of DOM-selector-based automation (WhatsApp Web's UI changes periodically and silently breaks that approach).
 
-If a WhatsApp send fails (e.g. the session somehow logs out), it's logged as a warning but doesn't affect the PDF — the diary is still fetched and saved either way.
+**Running WAHA:**
+```
+docker run -d --name waha \
+  -p 127.0.0.1:3000:3000 \
+  -v waha_sessions:/app/.sessions \
+  -e WHATSAPP_API_KEY=<a key of your choosing> \
+  -e WAHA_DASHBOARD_USERNAME=admin \
+  -e WAHA_DASHBOARD_PASSWORD=<same key> \
+  --restart unless-stopped \
+  devlikeapro/waha
+```
+Bound to `localhost` only — not exposed to the internet, since this script and WAHA run on the same machine. To do the one-time QR code login, tunnel its dashboard to your own machine (`ssh -L 3000:localhost:3000 <host>`), open `http://localhost:3000/dashboard/`, connect to the server (URL `http://localhost:3000`, API key as set above), and start a session named `default` — scan the QR code shown there with WhatsApp on your phone (Linked Devices). The session persists in the `waha_sessions` Docker volume afterward.
+
+Env vars: `WAHA_URL` (default `http://localhost:3000`), `WAHA_API_KEY` (must match what WAHA was started with), `WAHA_SESSION` (default `default`), `WHATSAPP_CHAT_ID` (optional — skips the by-name group lookup if set, e.g. `1234567890@g.us`).
+
+If a WhatsApp send fails (e.g. the session logs out, or WAHA isn't running), it's logged as a warning but doesn't affect the PDF — the diary is still fetched and saved either way.
+
+**Note on server sizing**: WAHA runs its own Chromium instance, which needs real memory headroom — a `t3.micro` (1GB RAM) EC2 instance was not enough and hung under memory pressure; add swap space (`fallocate`/`mkswap`/`swapon`, persisted via `/etc/fstab`) if running on a small instance.
 
 ## Scheduled daily run (Windows Task Scheduler)
 
