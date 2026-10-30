@@ -249,10 +249,27 @@ async function goToDiaryList(page) {
 }
 
 // Extracts the diary table for whatever date is currently displayed in the "View Diary" view.
+// The view loads via AJAX after the "View Diary" click, so the table can briefly be absent
+// or still empty right after networkidle resolves — poll a few times before giving up.
 async function extractDiaryData(page) {
+  const MAX_ATTEMPTS = 6;
+  const RETRY_DELAY_MS = 500;
+  let result = null;
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    result = await extractDiaryDataOnce(page);
+    if (result && result.rows.length > 0) return result;
+    if (attempt < MAX_ATTEMPTS) await page.waitForTimeout(RETRY_DELAY_MS);
+  }
+  return result;
+}
+
+async function extractDiaryDataOnce(page) {
   return page.evaluate(() => {
-    const tables = Array.from(document.querySelectorAll('table'));
-    const table = tables.find((t) => t.innerText.includes('S.no') && t.innerText.includes('Subject'));
+    // Match by class, not by header text: the portal's responsive table plugin
+    // (tablesaw-columntoggle) keeps the "S.no"/"Subject" header row CSS-hidden
+    // (display:none) at times, and innerText excludes hidden elements' text —
+    // so an innerText-based header search is unreliable depending on JS timing.
+    const table = document.querySelector('table.diary-table');
     if (!table) return null;
 
     const rows = Array.from(table.querySelectorAll('tr'));
@@ -269,13 +286,15 @@ async function extractDiaryData(page) {
         attachments.push({
           subject: subjectLabel,
           url: new URL(a.getAttribute('href'), window.location.href).toString(),
-          text: a.innerText.trim() || a.getAttribute('href'),
+          text: a.textContent.trim() || a.getAttribute('href'),
         });
       }
     };
 
     for (const row of rows) {
-      const cells = Array.from(row.querySelectorAll('td,th')).map((c) => c.innerText.trim());
+      // textContent, not innerText: tablesaw can CSS-hide cells responsively,
+      // and innerText (unlike textContent) excludes hidden elements' text.
+      const cells = Array.from(row.querySelectorAll('td,th')).map((c) => c.textContent.trim());
       if (cells.length === 0) continue;
       if (/^\d+$/.test(cells[0])) {
         dataRows.push({
