@@ -404,8 +404,16 @@ async function oldestDateOnPage(page) {
 // Finds and opens the diary entry for `targetDate` from the diary list page (paginating if needed).
 // Returns true if the entry was found and opened, false otherwise.
 async function openDiaryEntry(page, targetDate, targetLabel) {
+  // The list itself loads via AJAX after navigating in, so the very first check here
+  // (before any pagination) can run before rows have rendered — poll briefly first,
+  // same as the extraction retry below, instead of trusting networkidle timing.
   let targetRow = page.locator('tr', { hasText: targetLabel }).first();
   let rowFound = (await targetRow.count()) > 0;
+  for (let attempt = 0; !rowFound && attempt < 5; attempt += 1) {
+    await page.waitForTimeout(500);
+    targetRow = page.locator('tr', { hasText: targetLabel }).first();
+    rowFound = (await targetRow.count()) > 0;
+  }
 
   const MAX_PAGES = 20;
   let currentPage = 1;
